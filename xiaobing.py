@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # coding: utf-8
 
+import Queue
+from datetime import datetime, timedelta
 from wxbot import *
 
 
@@ -8,19 +10,33 @@ class XiaoBingWXBot(WXBot):
     def __init__(self):
         WXBot.__init__(self)
 
-        self.robot_switch = True
-        self.robot_uid = None
-        self.watch_gid = None
+        # === 配置信息 start ===
+        self.robot_name = u'小冰'          # 代理聊天机器人名称
+        self.watch_gname = u'智能测试'      # 监听群名称，只有监听的群才会处理，暂只支持一个群的监听
+        self.cur_chat_timeout_second = 10  # 每次会话等待时间，超过自动切换其他人
+        # === 配置信息 end ===
+
+        self.robot_switch = True            # 机器人天关
+        self.wait_robot_dtime = datetime.today() - timedelta(days=1)        # 最后一次等待机器人回复时间，回复完成自动清空
+        self.cur_chat_type = None           # 当前聊天类型： 3、 群消息； 4、 联系人；
+        self.robot_uid = None               # 代理聊天机器人ID
+        self.watch_gid = None               # 监听群ID
+        self.cur_chat_uid = None            # 当前聊天人ID
+
+        self.cur_chat_last_time = datetime.today() - timedelta(days=1)      # 与当前聊天人最后一次聊天时间
+        self.need_chat_queue = Queue.Queue()    # 待聊天队列，包含监听的群信息，与联系人信息
 
     def auto_switch(self, msg):
         msg_data = msg['content']['data']
         stop_cmd = [u'退下', u'走开', u'关闭', u'关掉', u'休息', u'滚开']
         start_cmd = [u'出来', u'启动', u'工作']
 
+        watch_gname_action = 'watch ', msg_data
         for account in self.group_list:
-            if msg_data == account['NickName']:
+            if watch_gname_action == account['NickName']:
+                self.watch_gname = account['NickName']
                 self.watch_gid = account['UserName']
-                print '    watch uid:', account['NickName'], self.watch_gid
+                print '    swith watch group:', account['NickName'], self.watch_gid
 
         if self.robot_switch:
             for i in stop_cmd:
@@ -33,33 +49,62 @@ class XiaoBingWXBot(WXBot):
                     self.robot_switch = True
                     self.send_msg_by_uid(u'[Robot]' + u'机器人已开启！', msg['to_user_id'])
 
+    def get_cur_chat_uid(self, need_chat_uid = None, need_chat_type = None):
+        if need_chat_uid is not None and need_chat_type is not None and need_chat_uid != self.robot_uid\
+                and (need_chat_uid != self.cur_chat_uid or need_chat_type != self.cur_chat_type):   # 需要切换当前聊天用户
+            if (datetime.today() - self.cur_chat_last_time).seconds > self.cur_chat_timeout_second and\
+                    (self.wait_robot_dtime is None or (datetime.today() - self.wait_robot_dtime).seconds > 3):     # 不存在等回复消息，或机器人回复消息超时时，进行切换
+                self.wait_robot_dtime = None
+                self.cur_chat_type = need_chat_type
+                self.cur_chat_uid = need_chat_uid
+                self.send_msg_by_uid(u'你好，超哥有事不在。我是他的机器人助理，现在由我和你聊聊天解解闷，等他回来后会立刻联系你的~', self.cur_chat_uid)
+
+        return self.cur_chat_uid if self.cur_chat_type == 4 else self.watch_gid
+
+    def auto_proxy_reply_msg(self, msg, to_uid):    # 自动代理转发消息
+        msg_type_id = msg['msg_type_id']
+        if not self.robot_switch and msg_type_id != 3 and msg_type_id != 4:
+            return
+
+        cur_chat_id = self.get_cur_chat_uid(msg['user']['id'], msg_type_id)
+        if msg['user']['id'] == self.robot_uid:    # 接收robot回复消息
+            self.wait_robot_dtime = None
+            to_uid = cur_chat_id
+        elif to_uid == self.robot_uid:   # 代理与机器人聊天
+            if msg['user']['id'] != cur_chat_id:
+                self.need_chat_queue.put(msg)
+                return
+
+        if msg['content']['type'] == 0:
+            if to_uid == self.robot_uid:
+                self.send_msg_by_uid(msg['content']['data'], to_uid)
+            else:
+                self.send_msg_by_uid(u'助理：' + msg['content']['data'], to_uid)
+        elif msg['content']['type'] == 3:
+            fpath = os.path.join(self.temp_pwd, self.get_msg_img(msg['msg_id']))
+            self.send_img_msg_by_uid(fpath, to_uid)
+        elif msg['content']['type'] == 4:
+            fpath = os.path.join(self.temp_pwd, self.get_voice(msg['msg_id']))
+            self.send_file_msg_by_uid(fpath, to_uid)
+        elif msg['content']['type'] == 13:
+            fpath = os.path.join(self.temp_pwd, self.get_video(msg['msg_id']))
+            self.send_file_msg_by_uid(fpath, to_uid)
+
     def handle_msg_all(self, msg):
         if not self.robot_switch and msg['msg_type_id'] != 1:
             return
         if msg['msg_type_id'] == 1 and msg['content']['type'] == 0:  # reply to self
             self.auto_switch(msg)
-        elif msg['msg_type_id'] == 4 and msg['content']['type'] == 0:  # text message from contact
-            print '    receive msg:', msg['user']['id'], msg['content']['data']
-        elif msg['msg_type_id'] == 5 or msg['msg_type_id'] == 3 and msg['content']['type'] != 0:  # text message from contact
-            uid = self.watch_gid
-            if msg['msg_type_id'] == 3:
-                uid = self.robot_uid
+            return
 
-            if msg['content']['type'] == 0:
-                print '    receive gongzhong msg:', msg['user']['id'], msg['content']['data']
-                self.send_msg_by_uid(msg['content']['data'], uid)
-            elif msg['content']['type'] == 3:
-                fpath = os.path.join(self.temp_pwd, self.get_msg_img(msg['msg_id']))
-                self.send_img_msg_by_uid(fpath, uid)
-            elif msg['content']['type'] == 4:
-                fpath = os.path.join(self.temp_pwd, self.get_voice(msg['msg_id']))
-                self.send_file_msg_by_uid(fpath, uid)
-            elif msg['content']['type'] == 13:
-                fpath = os.path.join(self.temp_pwd, self.get_video(msg['msg_id']))
-                self.send_file_msg_by_uid(fpath, uid)
-
-        elif msg['msg_type_id'] == 3 and msg['content']['type'] == 0:  # group text message
-            if 'detail' in msg['content'] and msg['user']['id'] == self.watch_gid:
+        if msg['msg_type_id'] == 4 and msg['content']['type'] == 0:  # text message from contact
+                self.auto_proxy_reply_msg(msg, self.robot_uid)
+        elif msg['msg_type_id'] == 5:  # text message from contact
+            self.auto_proxy_reply_msg(msg, None)
+        elif msg['msg_type_id'] == 3 and msg['user']['id'] == self.watch_gid:  # group text message
+            if msg['content']['type'] != 0:
+                self.auto_proxy_reply_msg(msg, self.robot_uid)
+            elif 'detail' in msg['content'] and msg['content']['type'] == 0:
                 my_names = self.get_group_member_name(msg['user']['id'], self.my_account['UserName'])
                 if my_names is None:
                     my_names = {}
@@ -78,29 +123,40 @@ class XiaoBingWXBot(WXBot):
                                 is_at_me = True
                                 break
                 if not is_at or is_at_me:
-                    # src_name = msg['content']['user']['name']
-                    # reply = 'to ' + src_name + ': '
-                    print '    receive group msg:', msg['content']['user']['id'], msg['content']['desc']
-                    # if msg['content']['type'] == 0:  # text message
-                    #     reply += self.tuling_auto_reply(msg['content']['user']['id'], msg['content']['desc'])
-                    # else:
-                    #     reply += u"对不起，只认字，其他杂七杂八的我都不认识，,,Ծ‸Ծ,,"
-                    # self.send_msg_by_uid(reply, msg['user']['id'])
-                    self.send_msg_by_uid(msg['content']['desc'], self.robot_uid)
+                    self.auto_proxy_reply_msg(msg, self.robot_uid)
+
+    def handle_history_msg_all(self):
+        queue = self.need_chat_queue
+        new_queue = Queue.Queue()
+
+        cur_chat_id = None
+
+        while True:
+            if queue.qsize() < 1:
+                break
+            else:
+                msg = queue.get()
+                if cur_chat_id is None:
+                    cur_chat_id = self.get_cur_chat_uid(msg['user']['id'], msg['msg_type_id'])
+                if cur_chat_id == msg['user']['id']:
+                    self.handle_msg(msg)
+                else:
+                    new_queue.put(msg)
+        self.need_chat_queue = new_queue
 
     def schedule(self):
-        if self.robot_uid == None or self.watch_gid == None:
+        if self.robot_uid is None or self.watch_gid is None:
             for account in self.public_list:
-                if u'小冰' == account['NickName']:
+                if self.robot_name == account['NickName']:
                     self.robot_uid = account['UserName']
                     print '    robot uid:', account['NickName'], self.robot_uid
 
             for account in self.group_list:
-                watch_group_name = u'到怀远的古惑仔们'
-                # watch_group_name = u'智能测试'
+                watch_group_name = u'智能测试'
                 if watch_group_name == account['NickName']:
                     self.watch_gid = account['UserName']
-                    print '    watch uid:', account['NickName'], self.watch_gid
+                    print '    watch group:', account['NickName'], self.watch_gid
+        self.handle_history_msg_all()
 
 def main():
     bot = XiaoBingWXBot()
@@ -112,4 +168,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

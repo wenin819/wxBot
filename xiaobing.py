@@ -14,6 +14,8 @@ class XiaoBingWXBot(WXBot):
         self.robot_name = u'小冰'          # 代理聊天机器人名称
         self.watch_gname = u'智能测试'      # 监听群名称，只有监听的群才会处理，暂只支持一个群的监听
         self.cur_chat_timeout_second = 10  # 每次会话等待时间，超过自动切换其他人
+
+        self.in_chat_tip_msg = u'你好，超哥有事不在。我是他的机器人助理，我上知天文，下知地理，欢迎与我聊天~'    # 机器人进入聊天提示
         # === 配置信息 end ===
 
         self.robot_switch = True            # 机器人天关
@@ -29,7 +31,7 @@ class XiaoBingWXBot(WXBot):
     def auto_switch(self, msg):
         msg_data = msg['content']['data']
         stop_cmd = [u'退下', u'走开', u'关闭', u'关掉', u'休息', u'滚开']
-        start_cmd = [u'出来', u'启动', u'工作']
+        start_cmd = [u'出来', u'启动', u'工作', u'开启']
 
         watch_gname_action = 'watch ', msg_data
         for account in self.group_list:
@@ -37,40 +39,48 @@ class XiaoBingWXBot(WXBot):
                 self.watch_gname = account['NickName']
                 self.watch_gid = account['UserName']
                 print '    swith watch group:', account['NickName'], self.watch_gid
+                return
 
         if self.robot_switch:
             for i in stop_cmd:
                 if i == msg_data:
                     self.robot_switch = False
                     self.send_msg_by_uid(u'[Robot]' + u'机器人已关闭！', msg['to_user_id'])
+                    return
         else:
             for i in start_cmd:
                 if i == msg_data:
                     self.robot_switch = True
                     self.send_msg_by_uid(u'[Robot]' + u'机器人已开启！', msg['to_user_id'])
+                    return
 
     def get_cur_chat_uid(self, need_chat_uid = None, need_chat_type = None):
         if need_chat_uid is not None and need_chat_type is not None and need_chat_uid != self.robot_uid\
                 and (need_chat_uid != self.cur_chat_uid or need_chat_type != self.cur_chat_type):   # 需要切换当前聊天用户
             if (datetime.today() - self.cur_chat_last_time).seconds > self.cur_chat_timeout_second and\
-                    (self.wait_robot_dtime is None or (datetime.today() - self.wait_robot_dtime).seconds > 3):     # 不存在等回复消息，或机器人回复消息超时时，进行切换
+                    (self.wait_robot_dtime is None or (datetime.today() - self.wait_robot_dtime).seconds > self.cur_chat_timeout_second):     # 不存在等回复消息，或机器人回复消息超时时，进行切换
                 self.wait_robot_dtime = None
                 self.cur_chat_type = need_chat_type
                 self.cur_chat_uid = need_chat_uid
-                self.send_msg_by_uid(u'你好，超哥有事不在。我是他的机器人助理，现在由我和你聊聊天解解闷，等他回来后会立刻联系你的~', self.cur_chat_uid)
+                self.send_msg_by_uid(self.in_chat_tip_msg, self.cur_chat_uid)
 
         return self.cur_chat_uid if self.cur_chat_type == 4 else self.watch_gid
 
-    def auto_proxy_reply_msg(self, msg, to_uid):    # 自动代理转发消息
+    def auto_proxy_reply_msg(self, msg, to_uid = None):    # 自动代理转发消息
         msg_type_id = msg['msg_type_id']
         if not self.robot_switch and msg_type_id != 3 and msg_type_id != 4:
             return
 
         cur_chat_id = self.get_cur_chat_uid(msg['user']['id'], msg_type_id)
         if msg['user']['id'] == self.robot_uid:    # 接收robot回复消息
-            self.wait_robot_dtime = None
-            to_uid = cur_chat_id
+            if self.wait_robot_dtime is not None and (datetime.today() - self.wait_robot_dtime).seconds < self.cur_chat_timeout_second:
+                self.wait_robot_dtime = None
+                to_uid = cur_chat_id
+            else:
+                self.wait_robot_dtime = None
+                return
         elif to_uid == self.robot_uid:   # 代理与机器人聊天
+            self.wait_robot_dtime = datetime.today()
             if msg['user']['id'] != cur_chat_id:
                 self.need_chat_queue.put(msg)
                 return
@@ -99,8 +109,8 @@ class XiaoBingWXBot(WXBot):
 
         if msg['msg_type_id'] == 4 and msg['content']['type'] == 0:  # text message from contact
                 self.auto_proxy_reply_msg(msg, self.robot_uid)
-        elif msg['msg_type_id'] == 5:  # text message from contact
-            self.auto_proxy_reply_msg(msg, None)
+        elif msg['msg_type_id'] == 5 and msg['user']['id'] == self.robot_uid:  # text message from contact
+            self.auto_proxy_reply_msg(msg)
         elif msg['msg_type_id'] == 3 and msg['user']['id'] == self.watch_gid:  # group text message
             if msg['content']['type'] != 0:
                 self.auto_proxy_reply_msg(msg, self.robot_uid)

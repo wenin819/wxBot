@@ -259,6 +259,16 @@ python test.py
     python bot.py
     ```
 
+***xiaobing.py*** 用微信小冰进行代理的自动回复机器人
+
+
+运行 ***xiaobing.py***
+
+    ```python
+    python xiaobing.py
+    ```
+
+
 ## 6 类似项目
 
 [feit/Weixinbot](https://github.com/feit/Weixinbot) Nodejs 封装网页版微信的接口，可编程控制微信消息
